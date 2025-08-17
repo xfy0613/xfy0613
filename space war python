@@ -1,0 +1,527 @@
+import pygame
+import random
+import math
+
+pygame.init()
+WIDTH, HEIGHT = 900, 800
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Space War - Enhanced")
+clock = pygame.time.Clock()
+FPS = 60
+
+WHITE = (255, 255, 255)
+RED = (220, 50, 50)
+GREEN = (50, 220, 50)
+BLUE = (50, 150, 220)
+YELLOW = (240, 240, 50)
+CYAN = (0, 255, 255)
+MAGENTA = (255, 0, 200)
+ORANGE = (255, 140, 0)
+BLACK = (0, 0, 0)
+GRAY = (40, 40, 40)
+
+font = pygame.font.SysFont("Arial", 20)
+
+POWERUP_TYPES = ["shield", "infinite_ammo", "heal", "weapon_upgrade"]
+
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self, x, y, size=40, color=RED, health=60, speed=2, attack_cooldown=2500, attack_type=None):
+        super().__init__()
+        self.size = size
+        self.image = pygame.Surface((size, size))
+        self.image.fill(color)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.health = health
+        self.max_health = health
+        self.speed = speed
+        self.dir_x = random.choice([-1, 1])
+        self.dir_y = random.choice([-1, 1])
+        self.attack_cooldown = attack_cooldown
+        self.last_attack = 0
+        self.color = color
+        self.attack_type = attack_type or random.choice(['scatter', 'direct'])
+
+    def update(self, now, enemy_bullets, player):
+        self.rect.x += self.speed * self.dir_x
+        self.rect.y += self.speed * self.dir_y
+        if self.rect.left < 0:
+            self.rect.left = 0
+            self.dir_x *= -1
+        if self.rect.right > WIDTH:
+            self.rect.right = WIDTH
+            self.dir_x *= -1
+        if self.rect.top < 0:
+            self.rect.top = 0
+            self.dir_y *= -1
+        if self.rect.bottom > HEIGHT // 2:
+            self.rect.bottom = HEIGHT // 2
+            self.dir_y *= -1
+
+        if now - self.last_attack > self.attack_cooldown:
+            self.last_attack = now
+            self.attack(enemy_bullets)
+
+    def attack(self, enemy_bullets):
+        if self.attack_type == 'scatter':
+            spread = 120
+            count = 7
+            start_angle = -spread / 2
+            step = spread / (count - 1)
+            for i in range(count):
+                angle = start_angle + i * step + 90
+                rad = math.radians(angle)
+                sx = 5 * math.cos(rad)
+                sy = 5 * math.sin(rad)
+                bullet = EnemyBullet(self.rect.centerx, self.rect.bottom, speed_y=sy, speed_x=sx, color=self.color, damage=6)
+                enemy_bullets.add(bullet)
+        elif self.attack_type == 'direct':
+            bullet = EnemyBullet(self.rect.centerx, self.rect.bottom, speed_y=6, speed_x=0, color=self.color, damage=8)
+            enemy_bullets.add(bullet)
+
+    def draw_hp(self, surf):
+        ratio = max(0, self.health / self.max_health)
+        pygame.draw.rect(surf, RED, (self.rect.left, self.rect.top - 8, self.size, 6))
+        pygame.draw.rect(surf, GREEN, (self.rect.left, self.rect.top - 8, self.size * ratio, 6))
+
+
+class Boss(Enemy):
+    def __init__(self, x, y, size=280, color=YELLOW, health=2500, speed=1.5, pattern_id=0):
+        super().__init__(x, y, size=size, color=color, health=health, speed=int(max(1, speed)), attack_cooldown=800)
+        self.pattern_id = pattern_id
+        self.last_charge = 0
+        self.charge_cd = 3000
+        self.last_attack = 0
+        self.image = pygame.Surface((size, size))
+        self.image.fill(color)
+        pygame.draw.rect(self.image, ORANGE, (4, 4, size - 8, size - 8), 4)
+        self.rect = self.image.get_rect(center=(x, y))
+
+    def update(self, now, enemy_bullets, player):
+        self.rect.x += int(math.sin(now / 400) * 4)
+        self.rect.x = max(0, min(WIDTH - self.rect.width, self.rect.x))
+
+        if self.pattern_id == 0:
+            if now - self.last_attack > self.attack_cooldown:
+                self.last_attack = now
+                self._sweep_fire(enemy_bullets, spread=220, count=25, speed=5)
+        elif self.pattern_id == 1:
+            if now - self.last_attack > self.attack_cooldown - 200:
+                self.last_attack = now
+                for _ in range(5):
+                    self._burst_down(enemy_bullets, count=10, speed=6)
+        else:
+            if now - self.last_charge > self.charge_cd:
+                self.last_charge = now
+                self._burst_down(enemy_bullets, count=50, speed=7)
+
+    def _sweep_fire(self, group, spread=220, count=25, speed=5):
+        start = -spread / 2
+        step = spread / (count - 1) if count > 1 else 0
+        for i in range(count):
+            ang = start + i * step + 90
+            rad = math.radians(ang)
+            sx = speed * math.cos(rad)
+            sy = speed * math.sin(rad)
+            group.add(EnemyBullet(self.rect.centerx, self.rect.bottom, speed_y=abs(sy), speed_x=sx, color=ORANGE, damage=10))
+
+    def _burst_down(self, group, count=10, speed=5):
+        for _ in range(count):
+            dx = random.randint(-int(self.rect.width // 2), int(self.rect.width // 2))
+            group.add(EnemyBullet(self.rect.centerx + dx, self.rect.bottom, speed_y=speed, speed_x=0, color=ORANGE, damage=12))
+
+
+class EnemyBullet(pygame.sprite.Sprite):
+    def __init__(self, x, y, speed_y=4, speed_x=0, color=RED, damage=5):
+        super().__init__()
+        self.image = pygame.Surface((6, 12), pygame.SRCALPHA)
+        pygame.draw.rect(self.image, color, (0, 0, 6, 12))
+        self.rect = self.image.get_rect(center=(x, y))
+        self.speed = speed_y
+        self.speed_x = speed_x
+        self.damage = damage
+
+    def update(self):
+        self.rect.y += self.speed
+        self.rect.x += self.speed_x
+        if self.rect.top > HEIGHT or self.rect.left > WIDTH or self.rect.right < 0:
+            self.kill()
+
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self):
+        super().__init__()
+        self.image = pygame.Surface((56, 44), pygame.SRCALPHA)
+        pygame.draw.polygon(self.image, CYAN, [(28, 0), (0, 44), (56, 44)])
+        self.rect = self.image.get_rect(midbottom=(WIDTH // 2, HEIGHT - 40))
+        self.speed = 6
+        self.max_health = 200
+        self.health = self.max_health
+        self.ammo = 120
+        self.max_ammo = 120
+        self.reloading = False
+        self.reload_time = 2000  # ms
+        self.reload_start = 0
+        self.last_shot = 0
+        self.shield = False
+        self.shield_time = 0
+        self.infinite_ammo = False
+        self.infinite_ammo_time = 0
+
+        self.weapons = {
+            1: Weapon("Assault", bullet_count=1, bullet_speed=14, cooldown=220, damage=12),
+            2: Weapon("Shotgun", bullet_count=5, bullet_speed=12, cooldown=700, spread=35, damage=8),
+            3: Weapon("SMG", bullet_count=1, bullet_speed=12, cooldown=90, damage=7),
+            4: Weapon("Sniper", bullet_count=1, bullet_speed=22, cooldown=900, damage=45),
+            5: Weapon("Rocket", bullet_count=1, bullet_speed=9, cooldown=1000, explosive=True, damage=35),
+            6: Weapon("MG", bullet_count=3, bullet_speed=12, cooldown=250, spread=12, damage=9),
+            7: Weapon("Plasma", bullet_count=1, bullet_speed=10, cooldown=400, damage=20),
+        }
+        self.current_weapon_id = 1
+
+    def update(self, keys, now):
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            self.rect.x -= self.speed
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            self.rect.x += self.speed
+        self.rect.left = max(0, self.rect.left)
+        self.rect.right = min(WIDTH, self.rect.right)
+
+        if self.reloading and now - self.reload_start >= self.reload_time:
+            self.ammo = self.max_ammo
+            self.reloading = False
+
+        if self.shield and now - self.shield_time > 7000:
+            self.shield = False
+        if self.infinite_ammo and now - self.infinite_ammo_time > 7000:
+            self.infinite_ammo = False
+
+        # weapon switch 1-7
+        if keys[pygame.K_1]:
+            self.current_weapon_id = 1
+        elif keys[pygame.K_2]:
+            self.current_weapon_id = 2
+        elif keys[pygame.K_3]:
+            self.current_weapon_id = 3
+        elif keys[pygame.K_4]:
+            self.current_weapon_id = 4
+        elif keys[pygame.K_5]:
+            self.current_weapon_id = 5
+        elif keys[pygame.K_6]:
+            self.current_weapon_id = 6
+        elif keys[pygame.K_7]:
+            self.current_weapon_id = 7
+
+    def shoot(self, now):
+        weapon = self.weapons[self.current_weapon_id]
+        if self.reloading:
+            return []
+        if now - self.last_shot < weapon.cooldown:
+            return []
+        if self.ammo <= 0 and not self.infinite_ammo:
+            self.reloading = True
+            self.reload_start = now
+            return []
+        self.last_shot = now
+        cost = 1
+        if weapon.bullet_count >= 3:
+            cost = weapon.bullet_count
+        if not self.infinite_ammo:
+            self.ammo = max(0, self.ammo - cost)
+        return weapon.shoot(self.rect.centerx, self.rect.top)
+
+    def draw_ui(self, surf):
+        ratio = max(0, self.health / self.max_health)
+        pygame.draw.rect(surf, GRAY, (10, HEIGHT - 60, 260, 22))
+        pygame.draw.rect(surf, RED, (10, HEIGHT - 60, 260, 22))
+        pygame.draw.rect(surf, GREEN, (10, HEIGHT - 60, 260 * ratio, 22))
+        surf.blit(font.render(f"HP: {self.health}/{self.max_health}", True, WHITE), (12, HEIGHT - 85))
+
+        ammo_text = "∞" if self.infinite_ammo else str(self.ammo)
+        surf.blit(font.render(f"Ammo: {ammo_text}", True, YELLOW), (10, HEIGHT - 110))
+
+        w = self.weapons[self.current_weapon_id]
+        surf.blit(font.render(f"Weapon [{self.current_weapon_id}]: {w.name}", True, CYAN), (10, HEIGHT - 140))
+
+
+class Weapon:
+    def __init__(self, name, bullet_count=1, bullet_speed=10, cooldown=300, spread=0, piercing=False, explosive=False, damage=10):
+        self.name = name
+        self.bullet_count = bullet_count
+        self.bullet_speed = bullet_speed
+        self.cooldown = cooldown
+        self.spread = spread
+        self.piercing = piercing
+        self.explosive = explosive
+        self.damage = damage
+
+    def shoot(self, x, y):
+        bullets = []
+        if self.bullet_count == 1:
+            bullets.append(Bullet(x, y, speed_y=-self.bullet_speed, speed_x=0,
+                                  color=CYAN, piercing=self.piercing, explosive=self.explosive, damage=self.damage))
+        else:
+            center_angle = 90
+            start_angle = center_angle - self.spread / 2
+            angle_step = self.spread / (self.bullet_count - 1) if self.bullet_count > 1 else 0
+            for i in range(self.bullet_count):
+                deg = start_angle + i * angle_step
+                rad = math.radians(deg)
+                sx = -self.bullet_speed * math.cos(rad)
+                sy = -self.bullet_speed * math.sin(rad)
+                bullets.append(Bullet(x, y, speed_y=sy, speed_x=sx,
+                                      color=CYAN, piercing=self.piercing, explosive=self.explosive, damage=self.damage))
+        return bullets
+
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y, speed_y=-8, speed_x=0, color=CYAN, piercing=False, explosive=False, damage=10):
+        super().__init__()
+        self.image = pygame.Surface((6, 14), pygame.SRCALPHA)
+        pygame.draw.rect(self.image, color, (0, 0, 6, 14))
+        self.rect = self.image.get_rect(center=(x, y))
+        self.speed_y = speed_y
+        self.speed_x = speed_x
+        self.piercing = piercing
+        self.explosive = explosive
+        self.damage = damage
+        self.hit_enemies = set()
+
+    def update(self):
+        self.rect.y += self.speed_y
+        self.rect.x += self.speed_x
+        if (self.rect.bottom < 0) or (self.rect.top > HEIGHT) or (self.rect.left > WIDTH) or (self.rect.right < 0):
+            self.kill()
+
+
+class Helper(pygame.sprite.Sprite):
+    def __init__(self, player, side_offset=-70):
+        super().__init__()
+        self.image = pygame.Surface((34, 22), pygame.SRCALPHA)
+        pygame.draw.rect(self.image, YELLOW, (0, 0, 34, 22))
+        self.rect = self.image.get_rect(midbottom=(player.rect.centerx + side_offset, player.rect.top))
+        self.player = player
+        self.side_offset = side_offset
+        self.last_shot = 0
+        self.cooldown = 1200
+
+    def update(self, now, bullets_group):
+        self.rect.midbottom = (self.player.rect.centerx + self.side_offset, self.player.rect.top)
+        if now - self.last_shot > self.cooldown:
+            self.last_shot = now
+            b = Bullet(self.rect.centerx, self.rect.top - 6, speed_y=-12, color=YELLOW, damage=8)
+            bullets_group.add(b)
+
+
+class PowerUp(pygame.sprite.Sprite):
+    def __init__(self, x, y, p_type):
+        super().__init__()
+        self.type = p_type
+        self.image = pygame.Surface((26, 26), pygame.SRCALPHA)
+        cmap = {"shield": CYAN, "infinite_ammo": YELLOW, "heal": GREEN, "weapon_upgrade": MAGENTA}
+        pygame.draw.circle(self.image, cmap.get(p_type, WHITE), (13, 13), 13)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.speed = 3
+
+    def update(self):
+        self.rect.y += self.speed
+        if self.rect.top > HEIGHT:
+            self.kill()
+
+
+class Star:
+    def __init__(self):
+        self.x = random.randint(0, WIDTH)
+        self.y = random.randint(0, HEIGHT)
+        self.speed = random.uniform(0.6, 1.2)
+        self.radius = random.randint(1, 3)
+        self.color = WHITE
+
+    def update(self):
+        self.y += self.speed
+        if self.y > HEIGHT:
+            self.x = random.randint(0, WIDTH)
+            self.y = 0
+
+    def draw(self, surf):
+        pygame.draw.circle(surf, self.color, (int(self.x), int(self.y)), self.radius)
+
+
+def spawn_enemies(level, enemies_group):
+    # enemies_group.empty()  # 取消這行
+    count = level * 3
+    for _ in range(count):
+        x = random.randint(30, WIDTH - 30)
+        y = random.randint(30, HEIGHT // 3)
+        hp = 50 + level * 10
+        spd = 1 + level * 0.1
+        atk_type = random.choice(['scatter', 'direct'])
+        enemy = Enemy(x, y, size=40, color=random.choice([RED, GREEN, BLUE]), health=hp, speed=spd, attack_type=atk_type)
+        enemies_group.add(enemy)
+
+
+
+def main():
+    player = Player()
+    player_group = pygame.sprite.Group(player)
+
+    helper_offsets_in_use = set([-70])
+    helpers = [Helper(player, side_offset=-70)]
+    helper_group = pygame.sprite.Group(helpers)
+
+    bullets = pygame.sprite.Group()
+    enemies = pygame.sprite.Group()
+    enemy_bullets = pygame.sprite.Group()
+    powerups = pygame.sprite.Group()
+    boss_group = pygame.sprite.Group()
+
+    stars = [Star() for _ in range(90)]
+
+    score = 0
+    level = 1
+    boss_alive = False
+
+    waiting_for_next_level = False
+    wait_start_time = 0
+    wait_duration = 3000  # 3秒等待時間
+
+    spawn_enemies(level, enemies)
+
+    running = True
+    while running:
+        now = pygame.time.get_ticks()
+        keys = pygame.key.get_pressed()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+        if not waiting_for_next_level:
+            # 正常遊戲更新
+            player.update(keys, now)
+
+            if keys[pygame.K_SPACE]:
+                new_bullets = player.shoot(now)
+                for b in new_bullets:
+                    bullets.add(b)
+
+            for h in helpers:
+                h.update(now, bullets)
+
+            enemies.update(now, enemy_bullets, player)
+            enemy_bullets.update()
+
+            boss_group.update(now, enemy_bullets, player)
+
+            bullets.update()
+            powerups.update()
+
+            for s in stars:
+                s.update()
+
+            # 子彈碰撞敵人
+            for bullet in bullets:
+                enemy_hit_list = pygame.sprite.spritecollide(bullet, enemies, False)
+                boss_hit_list = pygame.sprite.spritecollide(bullet, boss_group, False)
+                hit_any = False
+                for enemy in enemy_hit_list + boss_hit_list:
+                    if bullet not in bullet.hit_enemies:
+                        enemy.health -= bullet.damage
+                        bullet.hit_enemies.add(bullet)
+                        hit_any = True
+                        if enemy.health <= 0:
+                            enemy.kill()
+                            score += 10
+                            if random.random() < 0.2:
+                                powerup_type = random.choice(POWERUP_TYPES)
+                                powerups.add(PowerUp(enemy.rect.centerx, enemy.rect.centery, powerup_type))
+                if hit_any and not bullet.piercing:
+                    bullet.kill()
+
+            # 敵人子彈打到玩家
+            if not player.shield:
+                if pygame.sprite.spritecollide(player, enemy_bullets, True):
+                    player.health -= 20
+                    if player.health <= 0:
+                        running = False
+
+            # 玩家撿道具
+            powerup_hits = pygame.sprite.spritecollide(player, powerups, True)
+            for p in powerup_hits:
+                if p.type == "shield":
+                    player.shield = True
+                    player.shield_time = now
+                elif p.type == "infinite_ammo":
+                    player.infinite_ammo = True
+                    player.infinite_ammo_time = now
+                elif p.type == "heal":
+                    player.health = min(player.max_health, player.health + 50)
+                elif p.type == "weapon_upgrade":
+                    current = player.current_weapon_id
+                    if current < 7:
+                        player.current_weapon_id += 1
+
+            # 如果敵人都死光且Boss也不在，開始等待下一關
+            if len(enemies) == 0 and not boss_alive:
+                waiting_for_next_level = True
+                wait_start_time = now
+
+        else:
+            # 過關等待畫面
+            wait_time_left = max(0, (wait_duration - (now - wait_start_time)) // 1000)
+            wait_text = font.render(f"Level {level} cleared! Next level in {wait_time_left + 1}...", True, WHITE)
+            screen.fill(BLACK)
+            screen.blit(wait_text, (WIDTH // 2 - wait_text.get_width() // 2, HEIGHT // 2))
+            pygame.display.flip()
+
+            if now - wait_start_time >= wait_duration:
+                waiting_for_next_level = False
+                level += 1
+                enemy_bullets.empty()
+                bullets.empty()
+                powerups.empty()
+                boss_group.empty()
+
+                # 每5關出Boss，否則刷敵人
+                if level % 5 == 0:
+                    boss = Boss(WIDTH // 2, HEIGHT // 6, pattern_id=level % 3)
+                    boss_group.add(boss)
+                    boss_alive = True
+                else:
+                    spawn_enemies(level, enemies)
+                    boss_alive = False
+
+            continue  # 直接下一輪迴圈，不跑下面繪圖，避免重複畫面
+
+        # 畫面繪製
+        screen.fill(BLACK)
+
+        for s in stars:
+            s.draw(screen)
+
+        player_group.draw(screen)
+        bullets.draw(screen)
+        enemies.draw(screen)
+        enemy_bullets.draw(screen)
+        helper_group.draw(screen)
+        powerups.draw(screen)
+        boss_group.draw(screen)
+
+        for e in enemies:
+            e.draw_hp(screen)
+        for b in boss_group:
+            b.draw_hp(screen)
+
+        player.draw_ui(screen)
+
+        score_text = font.render(f"Score: {score}  Level: {level}", True, WHITE)
+        screen.blit(score_text, (WIDTH - 200, HEIGHT - 40))
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    pygame.quit()
+
+
+
+if __name__ == "__main__":
+    main()
