@@ -1,0 +1,27 @@
+import random
+
+player = None
+computer = None
+running = True
+options = ("scissor","rock","paper")
+
+while running:
+    player = input("請輸入scissor,rock,paper:")
+    while player not in options:
+        input("輸入錯誤" "請輸入scissor,rock,paper:")
+    computer = random.choice(options)
+    print(f"玩家：{player} , 電腦：{computer}")
+    if player == computer:
+        print("平手")
+    elif player == "scissor" and computer == "paper":
+        print("玩家獲勝")
+    elif player == "rock" and computer == "scissor":
+        print("玩家獲勝")
+    elif player == "paper" and computer == "rock":
+        print("玩家獲勝")
+    else:
+        print("電腦獲勝")
+    play_again = input("再玩一局？(y/n)").lower()
+    if not play_again == "y":
+        running = False
+        print("謝謝來玩這個遊戲")
