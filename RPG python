@@ -1,0 +1,544 @@
+# block_warfare_skeleton.py (修正版)
+from ursina import *
+import random, time, math
+
+# =========================
+# 基本設定
+# =========================
+app = Ursina()
+window.title = "Block Warfare - Skeleton"
+window.borderless = False
+window.fps_counter.enabled = True
+mouse.visible = False
+
+# ---- 常數 ----
+MAP_HALF = 100            # 地圖半徑（XZ），總寬約 200
+NUM_PER_TEAM = 6          # 每隊人數
+PLAYER_SPEED = 6
+AI_SPEED = 3.8
+GRAVITY = 18
+JUMP_VEL = 7.5
+BULLET_SPEED = 28
+BULLET_LIFE = 2.0
+SHOOT_COOLDOWN = 0.32
+RESPAWN_PADDING = 12
+MAX_KILLFEED = 6
+TEAM_COLORS = {'blue': color.azure, 'red': color.red}
+
+# =========================
+# 場景與物件容器
+# =========================
+ground = None
+obstacles = []     # 所有障礙（倉庫、樹、牆、碉堡…）
+terrain = []       # 地形方塊（森林高低起伏）
+characters = []    # 所有人物
+bullets = []       # 子彈
+floating_texts = []# 飄字（擊殺數字可擴充）
+
+# =========================
+# 工具
+# =========================
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def aabb_hit(pos, half, e):
+    """簡單 AABB 碰撞：pos±half vs entity e"""
+    return (abs(pos.x - e.x) <= (half.x + e.scale_x * 0.5)
+            and abs(pos.y - e.y) <= (half.y + e.scale_y * 0.5)
+            and abs(pos.z - e.z) <= (half.z + e.scale_z * 0.5))
+
+def random_spawn_in(team):
+    """在各自半場角落附近找重生點（盡量避開障礙）"""
+    for _ in range(120):
+        if team == 'blue':
+            x = random.randint(-MAP_HALF+RESPAWN_PADDING, -MAP_HALF//2)
+            z = random.randint(-MAP_HALF+RESPAWN_PADDING, -MAP_HALF//2)
+        else:
+            x = random.randint(MAP_HALF//2, MAP_HALF-RESPAWN_PADDING)
+            z = random.randint(MAP_HALF//2, MAP_HALF-RESPAWN_PADDING)
+        pos = Vec3(x, 1, z)
+        if all(distance(pos, o.position) > max(o.scale_x, o.scale_z) * 0.6 + 1.5 for o in obstacles):
+            return pos
+    return Vec3(0, 1, 0)
+
+def clear_map():
+    global ground, obstacles, terrain
+    if ground: 
+        try: destroy(ground)
+        except: pass
+    for e in list(obstacles):
+        try: destroy(e)
+        except: pass
+    for t in list(terrain):
+        try: destroy(t)
+        except: pass
+    obstacles.clear()
+    terrain.clear()
+
+# =========================
+# 兩種地圖建置
+# =========================
+def build_forest():
+    """森林：高低方塊地形 + 樹"""
+    clear_map()
+    # 地板
+    grass = color.rgb(90, 120, 90)
+    global ground
+    ground = Entity(model='plane', scale=(MAP_HALF*2,1,MAP_HALF*2), color=grass, texture='white_cube', collider='box')
+
+    # 高低起伏：稀疏堆方塊
+    for _ in range(380):
+        x = random.randint(-MAP_HALF+6, MAP_HALF-6)
+        z = random.randint(-MAP_HALF+6, MAP_HALF-6)
+        h = random.randint(1, 4)  # 小丘
+        for y in range(h):
+            b = Entity(model='cube', color=grass, position=(x, y+0.5, z), scale=(2,1,2), collider='box')
+            terrain.append(b)
+
+    # 樹（樹幹+樹葉）
+    tree_green = color.rgb(60, 110, 60)
+    for _ in range(140):
+        x = random.randint(-MAP_HALF+8, MAP_HALF-8)
+        z = random.randint(-MAP_HALF+8, MAP_HALF-8)
+        if random.random() < .4:
+            # 稍微避免重疊：粗略檢查
+            if any(abs(x - o.x) < 2 and abs(z - o.z) < 2 for o in obstacles): continue
+        trunk_h = random.choice([3,4,5])
+        trunk = Entity(model='cube', color=color.brown, position=(x, trunk_h/2, z), scale=(1, trunk_h, 1), collider='box')
+        leaves = Entity(model='cube', color=tree_green, position=(x, trunk_h+1.2, z), scale=(3,3,3), collider='box')
+        obstacles.extend([trunk, leaves])
+
+def build_military():
+    """軍營：牆、倉庫、塔、掩體"""
+    clear_map()
+    global ground
+    ground = Entity(model='plane', scale=(MAP_HALF*2,1,MAP_HALF*2), color=color.gray, texture='white_cube', collider='box')
+
+    # 外牆
+    wall_color = color.rgb(120, 120, 130)
+    wall_h = 4
+    for x in range(-MAP_HALF, MAP_HALF, 4):
+        obstacles.append(Entity(model='cube', color=wall_color, position=(x, wall_h/2, -MAP_HALF+1), scale=(4, wall_h, 2), collider='box'))
+        obstacles.append(Entity(model='cube', color=wall_color, position=(x, wall_h/2, MAP_HALF-1),  scale=(4, wall_h, 2), collider='box'))
+    for z in range(-MAP_HALF, MAP_HALF, 4):
+        obstacles.append(Entity(model='cube', color=wall_color, position=(-MAP_HALF+1, wall_h/2, z), scale=(2, wall_h, 4), collider='box'))
+        obstacles.append(Entity(model='cube', color=wall_color, position=( MAP_HALF-1, wall_h/2, z), scale=(2, wall_h, 4), collider='box'))
+
+    # 倉庫（長方體）
+    for _ in range(30):
+        x = random.randint(-MAP_HALF+10, MAP_HALF-10)
+        z = random.randint(-MAP_HALF+10, MAP_HALF-10)
+        sx = random.choice([6,8,10,12])
+        sz = random.choice([6,8,10,12])
+        sy = random.choice([3,4,5])
+        obstacles.append(Entity(model='cube', color=color.rgb(100,100,110), position=(x, sy/2, z), scale=(sx, sy, sz), collider='box'))
+
+    # 碉堡塔
+    for _ in range(10):
+        x = random.randint(-MAP_HALF+20, MAP_HALF-20)
+        z = random.randint(-MAP_HALF+20, MAP_HALF-20)
+        tower = Entity(model='cube', color=color.rgb(80,80,90), position=(x, 6, z), scale=(4,12,4), collider='box')
+        obstacles.append(tower)
+
+    # 掩體
+    for _ in range(60):
+        x = random.randint(-MAP_HALF+6, MAP_HALF-6)
+        z = random.randint(-MAP_HALF+6, MAP_HALF-6)
+        sx = random.choice([2,3,4])
+        sz = random.choice([2,3,4])
+        sy = random.choice([2,3])
+        obstacles.append(Entity(model='cube', color=color.dark_gray, position=(x, sy/2, z), scale=(sx, sy, sz), collider='box'))
+
+# =========================
+# 角色
+# =========================
+class BlockChar(Entity):
+    def __init__(self, team='blue', name='Unit', is_player=False, pos=(0,1,0)):
+        super().__init__(position=Vec3(pos))
+        self.team = team
+        self.is_player = is_player
+        self.name = name
+        self.health = 100
+        self.speed = PLAYER_SPEED if is_player else AI_SPEED
+        self.velocity_y = 0
+        self.on_ground = True
+        self.shoot_cd = -999
+
+        body_col = TEAM_COLORS[team]
+        skin = color.rgb(255,224,189)
+
+        # 身體（Minecraft 風）
+        self.body  = Entity(parent=self, model='cube', color=body_col, scale=(0.9,1.4,0.5), y=0.0)
+        self.head  = Entity(parent=self, model='cube', color=skin,     scale=(0.8,0.8,0.8), y=1.1)
+        self.larm  = Entity(parent=self, model='cube', color=body_col, scale=(0.2,0.9,0.2), x=-0.55, y=0.0)
+        self.rarm  = Entity(parent=self, model='cube', color=body_col, scale=(0.2,0.9,0.2), x= 0.55, y=0.0)
+        self.lleg  = Entity(parent=self, model='cube', color=skin,     scale=(0.25,0.9,0.25), x=-0.2, y=-1.05)
+        self.rleg  = Entity(parent=self, model='cube', color=skin,     scale=(0.25,0.9,0.25), x= 0.2, y=-1.05)
+        self.gun   = Entity(parent=self.body, model='cube', color=color.black, scale=(0.2,0.2,1.0), position=(0.6,0,0.1))
+
+        # 簡易 HP 條（面向相機）
+        self.hp_back = Entity(parent=self, model='cube', color=color.rgba(0,0,0,120),
+                              scale=(1.0,0.12,0.02), position=(0,1.6,0.25))
+        self.hp_front = Entity(parent=self, model='cube', color=color.lime,
+                               scale=(1.0,0.12,0.02), position=(0,1.6,0.26))
+
+        # 碰撞盒
+        self.collider = BoxCollider(self, Vec3(0,0,0), Vec3(0.9,2.2,0.9))
+
+    def look_towards_flat(self, dir3:Vec3):
+        flat = Vec3(dir3.x, 0, dir3.z)
+        if flat.length() > 1e-3:
+            self.rotation_y = math.degrees(math.atan2(flat.x, flat.z))
+
+    def apply_gravity(self, dt):
+        self.velocity_y -= GRAVITY * dt
+        self.y += self.velocity_y * dt
+        # 地面碰撞（簡化：y<=1 視為地面）
+        if self.y <= 1:
+            self.y = 1
+            self.velocity_y = 0
+            self.on_ground = True
+
+    def jump(self):
+        if self.on_ground:
+            self.velocity_y = JUMP_VEL
+            self.on_ground = False
+
+    def face_hud(self):
+        # 讓 HP 條面向相機（避免昂貴的 3D->2D 轉換）
+        # 使用 Vec3.up 作為 axis（不要傳字串）
+        try:
+            self.hp_back.look_at(camera.world_position, axis=Vec3.up)
+            self.hp_front.look_at(camera.world_position, axis=Vec3.up)
+        except Exception:
+            # 保險 fallback：直接設定面向 camera 平面方向
+            dir_vec = (camera.world_position - self.world_position)
+            dir_vec.y = 0
+            if dir_vec.length() > 0:
+                self.hp_back.rotation_y = math.degrees(math.atan2(dir_vec.x, dir_vec.z))
+                self.hp_front.rotation_y = self.hp_back.rotation_y
+
+        # 更新血條長度
+        self.hp_front.scale_x = max(self.health/100, 0.001)
+
+# =========================
+# 子彈
+# =========================
+class Bullet(Entity):
+    def __init__(self, pos, direction, owner):
+        super().__init__(model='cube', color=color.yellow, scale=0.25, position=Vec3(pos))
+        self.vel = direction.normalized() * BULLET_SPEED
+        self.life = BULLET_LIFE
+        self.owner = owner
+        self.collider = 'box'
+        bullets.append(self)
+
+# =========================
+# HUD / 訊息
+# =========================
+score_blue = 0
+score_red = 0
+crosshair = Text(text='+', parent=camera.ui, scale=2.5, origin=(0,0), position=(0,0))
+score_text = Text(text='Blue 0 : 0 Red', parent=camera.ui, position=(0, .45), origin=(0,0), scale=1.2)
+killfeed_texts = []  # 右上角垂直堆疊
+for i in range(MAX_KILLFEED):
+    t = Text(text='', parent=camera.ui, position=(.75, .45 - i*0.05), origin=(0,0), scale=.9)
+    killfeed_texts.append(t)
+killfeed_queue = []  # (msg, time)
+
+def push_killfeed(msg):
+    killfeed_queue.append([msg, time.time()])
+    if len(killfeed_queue) > MAX_KILLFEED:
+        killfeed_queue.pop(0)
+
+def refresh_hud():
+    score_text.text = f'Blue {score_blue} : {score_red} Red'
+    # 秀出最近訊息，超過 3 秒淡出
+    now = time.time()
+    for i, slot in enumerate(killfeed_texts):
+        if i < len(killfeed_queue):
+            msg, ts = killfeed_queue[-1 - i]
+            age = now - ts
+            alpha = clamp(1.0 - (age-1.5)/1.5, 0, 1) if age > 1.5 else 1.0
+            slot.text = msg
+            # 使用 rgba 的 alpha (0..255)
+            slot.color = color.rgba(255,255,255,int(255*alpha))
+        else:
+            slot.text = ''
+
+# =========================
+# 建立隊伍與玩家
+# =========================
+def build_teams():
+    global characters, player, player_team
+    for c in characters: 
+        try: destroy(c)
+        except: pass
+    characters.clear()
+
+    player_team = random.choice(['blue','red'])
+    print('You are assigned to', player_team, 'team')
+
+    # 先放玩家
+    player = BlockChar(team=player_team, name='YOU', is_player=True, pos=random_spawn_in(player_team))
+    characters.append(player)
+
+    # 其他 AI（補到 6v6）
+    need_blue = NUM_PER_TEAM - (1 if player_team=='blue' else 0)
+    need_red  = NUM_PER_TEAM - (1 if player_team=='red'  else 0)
+
+    for i in range(need_blue):
+        characters.append(BlockChar(team='blue', name=f'Blue{i+1}', pos=random_spawn_in('blue')))
+    for i in range(need_red):
+        characters.append(BlockChar(team='red',  name=f'Red{i+1}',  pos=random_spawn_in('red')))
+
+# =========================
+# 照相機：第一/第三人稱
+# =========================
+is_fp = True
+player_camera_pivot = None
+fp_gun = None
+
+def set_first_person():
+    global is_fp
+    camera.parent = player_camera_pivot
+    camera.position = Vec3(0, 0, 0)
+    camera.rotation = (0, 0, 0)
+    camera.fov = 95
+    if fp_gun: fp_gun.enabled = True
+    player.gun.enabled = False
+    is_fp = True
+
+def set_third_person():
+    global is_fp
+    camera.parent = None
+    camera.position = player.world_position + Vec3(0, 6, -10)
+    camera.look_at(player.world_position + Vec3(0,1.3,0))
+    if fp_gun: fp_gun.enabled = False
+    player.gun.enabled = True
+    is_fp = False
+
+def rebuild_camera_mount():
+    global player_camera_pivot, fp_gun
+    if player_camera_pivot: 
+        try: destroy(player_camera_pivot)
+        except: pass
+    player_camera_pivot = Entity(parent=player, y=1.6)
+    if fp_gun: 
+        try: destroy(fp_gun)
+        except: pass
+    fp_gun = Entity(parent=player_camera_pivot, model='cube', color=color.black,
+                    scale=(0.1,0.1,0.8), position=(0.35,-0.2,0.9))
+
+# =========================
+# AI 行為
+# =========================
+def ai_tick(ch: BlockChar, dt: float):
+    enemies = [e for e in characters if e.team != ch.team and e.health > 0]
+    if not enemies:
+        return
+    target = min(enemies, key=lambda t: distance(t.position, ch.position))
+    to = target.position - ch.position
+    to.y = 0
+    dist = to.length()
+
+    # 目標方向
+    if dist > 0.1:
+        ch.look_towards_flat(to)
+
+    # 簡單避障：預測一步，若撞到障礙則側移
+    step = to.normalized() * ch.speed * dt * 0.85
+    proposed = ch.position + step
+    half = Vec3(0.45, 1.1, 0.45)
+    blocked = False
+    for o in obstacles:
+        if aabb_hit(proposed, half, o):
+            blocked = True
+            break
+
+    if not blocked and dist > 2.2:
+        ch.position = proposed
+    else:
+        # 隨機繞行
+        ang = random.uniform(-math.pi, math.pi)
+        sidestep = Vec3(math.cos(ang),0,math.sin(ang)) * ch.speed * dt * 0.6
+        ch.position += sidestep
+
+    # 偶爾跳躍
+    if random.random() < 0.015 and ch.on_ground:
+        ch.jump()
+
+    # 射擊（距離內）
+    if dist < 22 and time.time() - ch.shoot_cd > 0.55:
+        dir_shoot = (target.position - (ch.position + Vec3(0,1.2,0))).normalized()
+        Bullet(pos=ch.position + Vec3(0,1.2,0), direction=dir_shoot, owner=ch)
+        ch.shoot_cd = time.time()
+
+# =========================
+# 子彈/擊殺處理
+# =========================
+def handle_bullets(dt):
+    global score_blue, score_red
+    to_remove = []
+    for b in bullets:
+        b.position += b.vel * dt
+        b.life -= dt
+        if b.life <= 0 or abs(b.x) > MAP_HALF+5 or abs(b.z) > MAP_HALF+5:
+            to_remove.append(b)
+            continue
+        # 擊中障礙
+        hit_wall = False
+        for o in obstacles:
+            if aabb_hit(b.position, Vec3(0.12,0.12,0.12), o):
+                hit_wall = True
+                break
+        if hit_wall:
+            to_remove.append(b)
+            continue
+        # 擊中角色
+        for ch in characters:
+            if ch is b.owner or ch.health <= 0:
+                continue
+            if aabb_hit(b.position, Vec3(0.25,0.25,0.25), ch):
+                ch.health -= 20
+                to_remove.append(b)
+                if ch.health <= 0:
+                    killer = 'YOU' if b.owner.is_player else b.owner.name
+                    victim = 'YOU' if ch.is_player else ch.name
+                    push_killfeed(f'{killer} -> {victim}')
+                    if ch.team == 'blue':
+                        score_red += 1
+                    else:
+                        score_blue += 1
+                break
+    for b in to_remove:
+        if b in bullets:
+            try: destroy(b)
+            except: pass
+            bullets.remove(b)
+
+# =========================
+# 輸入
+# =========================
+last_toggle = 0
+current_map = 'forest'
+
+def input(key):
+    global last_toggle, current_map
+    if key == 'escape':
+        application.quit()
+
+    if key == 'v' and time.time() - last_toggle > .2:
+        if is_fp: set_third_person()
+        else: set_first_person()
+        last_toggle = time.time()
+
+    if key == 'm' and time.time() - last_toggle > .3:
+        # 切換地圖：保留人物與分數
+        if current_map == 'forest':
+            build_military()
+            current_map = 'military'
+        else:
+            build_forest()
+            current_map = 'forest'
+        # 把玩家與 AI 移到各自重生區，避免卡在牆裡
+        for ch in characters:
+            ch.position = random_spawn_in(ch.team)
+        last_toggle = time.time()
+
+# =========================
+# 主更新
+# =========================
+def update():
+    dt = time.dt
+
+    # --- 玩家死亡 & 重生 ---
+    if player.health <= 0:
+        player.position = random_spawn_in(player.team)
+        player.health = 100
+        player.velocity_y = 0
+        player.on_ground = True
+
+    # --- 玩家視角旋轉（滑鼠） ---
+    sens = 80
+    if is_fp:
+        player.rotation_y += mouse.velocity[0] * sens
+        player_camera_pivot.rotation_x = clamp(player_camera_pivot.rotation_x - mouse.velocity[1] * sens, -70, 70)
+    else:
+        player.rotation_y += mouse.velocity[0] * sens * 0.8
+        player_camera_pivot.rotation_x = clamp(player_camera_pivot.rotation_x - mouse.velocity[1] * sens * 0.5, -40, 40)
+
+    # --- 玩家移動 ---
+    forward = player.forward
+    right = player.right
+    forward.y = 0; right.y = 0
+    forward = forward.normalized(); right = right.normalized()
+
+    mv = Vec3(held_keys['d'] - held_keys['a'], 0, held_keys['s'] - held_keys['w'])
+    if mv.length() > 0:
+        wish = (right * mv.x + forward * mv.z).normalized()
+        player.look_towards_flat(wish)
+        proposed = player.position + wish * player.speed * dt
+        # 邊界
+        proposed.x = clamp(proposed.x, -MAP_HALF+1, MAP_HALF-1)
+        proposed.z = clamp(proposed.z, -MAP_HALF+1, MAP_HALF-1)
+        # 簡單避牆
+        half = Vec3(0.45, 1.1, 0.45)
+        blocked = any(aabb_hit(proposed, half, o) for o in obstacles)
+        if not blocked:
+            player.position = proposed
+
+    # 跳躍 / 重力
+    if held_keys['space'] and player.on_ground:
+        player.jump()
+    player.apply_gravity(dt)
+
+    # 射擊（E）
+    if held_keys['e'] and time.time() - player.shoot_cd > SHOOT_COOLDOWN:
+        player.shoot_cd = time.time()
+        # 第一人稱以鏡頭前向為準；第三人稱用玩家 forward
+        shoot_dir = camera.forward if is_fp else player.forward
+        Bullet(pos=player.position + Vec3(0,1.2,0), direction=shoot_dir, owner=player)
+
+    # --- AI 更新 ---
+    for ch in characters:
+        if ch is player:
+            continue
+        if ch.health <= 0:
+            ch.position = random_spawn_in(ch.team)
+            ch.health = 100
+            ch.velocity_y = 0
+            ch.on_ground = True
+            continue
+        # AI 移動 & 重力
+        ai_tick(ch, dt)
+        ch.apply_gravity(dt)
+        # 地圖邊界
+        ch.x = clamp(ch.x, -MAP_HALF+1, MAP_HALF-1)
+        ch.z = clamp(ch.z, -MAP_HALF+1, MAP_HALF-1)
+
+    # --- 子彈 ---
+    handle_bullets(dt)
+
+    # --- HP 條面向鏡頭 ---
+    for ch in characters:
+        ch.face_hud()
+
+    # --- 第三人稱鏡頭跟隨 ---
+    if not is_fp:
+        target = player.world_position + Vec3(0, 6, -10)
+        camera.position = lerp(camera.position, target, min(1, dt*4))
+        camera.look_at(player.world_position + Vec3(0,1.3,0))
+
+    # --- HUD ---
+    refresh_hud()
+
+# =========================
+# 初始化：預設森林地圖
+# =========================
+build_forest()
+build_teams()
+rebuild_camera_mount()
+set_first_person()
+
+app.run()
